@@ -1,0 +1,6 @@
+# OS / Editor temporary files
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.swp

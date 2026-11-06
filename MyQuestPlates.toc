@@ -1,0 +1,14 @@
+## Interface: 16001, 11508, 11507, 20504, 20505, 110000, 110100, 110200, 120000, 120001
+## Title: MyQuestPlates
+## Notes: Places quest objective icons (slay, loot, talk) and progress counts on default nameplates like Questie.
+## Author: KD
+## Version: 1.0.0
+## SavedVariables: MyQuestPlatesDB
+## IconTexture: Interface\Icons\INV_Misc_QuestionMark
+## OptionalDeps: Questie, MyPlates
+
+Compat.lua
+Config.lua
+QuestDrops.lua
+Core.lua
+Options.lua
