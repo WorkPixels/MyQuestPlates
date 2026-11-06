@@ -409,6 +409,17 @@ local function GetSingularWord(w)
     return s
 end
 
+local GROUP_PREFIXES = {
+    defias = true, scarlet = true, syndicate = true, venture = true,
+    riverpaw = true, blackrock = true, bloodscalp = true, skullsplitter = true,
+    kurzen = true, wastewander = true, southsea = true, bloodsail = true,
+    kolkar = true, galak = true, grimtotem = true, boulderfist = true,
+    crushridge = true, dragonmaw = true, darkshore = true, ashenvale = true,
+    darkspear = true, stormwind = true, ironforge = true, orgrimmar = true,
+    murloc = true, gnoll = true, kobold = true, trogg = true,
+    harpy = true, centaur = true, quillboar = true, furbolg = true,
+}
+
 local function IsNameMatch(unitName, targetName, isItem)
     if not unitName or not targetName or IsSecretValue(unitName) or IsSecretValue(targetName) then return false end
     local u = string.lower(strtrim(unitName))
@@ -429,17 +440,17 @@ local function IsNameMatch(unitName, targetName, isItem)
         return true
     end
 
-    -- 3. Word-level extraction with stop-words and drop-nouns filtering
+    -- 3. Extract core words excluding stop words and item drop nouns
     local uWords = {}
     for w in string.gmatch(u, "%a+") do
-        if not CREATURE_PREFIXES[w] and not STOP_WORDS[w] then
+        if not STOP_WORDS[w] then
             table.insert(uWords, GetSingularWord(w))
         end
     end
 
     local tWords = {}
     for w in string.gmatch(t, "%a+") do
-        if not CREATURE_PREFIXES[w] and not STOP_WORDS[w] then
+        if not STOP_WORDS[w] then
             if not (isItem and DROP_NOUNS[w]) then
                 table.insert(tWords, GetSingularWord(w))
             end
@@ -452,27 +463,67 @@ local function IsNameMatch(unitName, targetName, isItem)
     local tClean = table.concat(tWords, " ")
     if uClean == tClean then return true end
 
-    -- 4. Check significant word sharing & compound matches
-    for _, tw in ipairs(tWords) do
-        local twLen = string.len(tw)
-        local isSig = (twLen >= 4 or SHORT_CREATURE_WORDS[tw])
-        if isSig then
-            for _, uw in ipairs(uWords) do
-                local uwLen = string.len(uw)
-                if tw == uw then
-                    return true
-                end
-                -- Compound word matching (e.g. duskbat vs bat, nightsaber vs saber)
-                if twLen >= 3 and uwLen > twLen then
-                    if string.sub(uw, 1, twLen) == tw or string.sub(uw, -twLen) == tw then
-                        return true
-                    end
-                end
-                if uwLen >= 3 and twLen > uwLen then
-                    if string.sub(tw, 1, uwLen) == uw or string.sub(tw, -uwLen) == uw then
-                        return true
-                    end
-                end
+    -- 4. Filter out creature age/size prefixes (young, starving, giant, etc.)
+    local uCore = {}
+    for _, w in ipairs(uWords) do
+        if not CREATURE_PREFIXES[w] then
+            table.insert(uCore, w)
+        end
+    end
+    local tCore = {}
+    for _, w in ipairs(tWords) do
+        if not CREATURE_PREFIXES[w] then
+            table.insert(tCore, w)
+        end
+    end
+
+    if #uCore > 0 and #tCore > 0 then
+        if table.concat(uCore, " ") == table.concat(tCore, " ") then
+            return true
+        end
+    end
+
+    -- 5. Disambiguate different ranks/roles within the same group (e.g. Defias Smuggler vs Defias Traitor)
+    local sharedWords = {}
+    local diffT = {}
+    local diffU = {}
+
+    local uCoreSet = {}
+    for _, w in ipairs(uCore) do uCoreSet[w] = true end
+    local tCoreSet = {}
+    for _, w in ipairs(tCore) do tCoreSet[w] = true end
+
+    for _, w in ipairs(tCore) do
+        if uCoreSet[w] then
+            table.insert(sharedWords, w)
+        else
+            table.insert(diffT, w)
+        end
+    end
+    for _, w in ipairs(uCore) do
+        if not tCoreSet[w] then
+            table.insert(diffU, w)
+        end
+    end
+
+    -- If both have differing specific nouns (e.g. smuggler vs traitor, worker vs vermin)
+    if #diffT > 0 and #diffU > 0 then
+        local allSharedAreGroups = true
+        for _, sw in ipairs(sharedWords) do
+            if not GROUP_PREFIXES[sw] then
+                allSharedAreGroups = false
+                break
+            end
+        end
+        if allSharedAreGroups then
+            return false
+        end
+    end
+
+    if #sharedWords > 0 then
+        for _, sw in ipairs(sharedWords) do
+            if not GROUP_PREFIXES[sw] and string.len(sw) >= 4 then
+                return true
             end
         end
     end
@@ -724,10 +775,12 @@ function NS.UpdateQuestLogCache()
                                 })
 
                                 -- Index spawns directly for O(1) matching
+                                local hasQuestieSpawns = false
                                 if obj.spawnList and type(obj.spawnList) == "table" then
                                     for spawnId, spawnData in pairs(obj.spawnList) do
                                         local nId = tonumber(spawnId) or (type(spawnData) == "table" and tonumber(spawnData.Id))
                                         if nId then
+                                            hasQuestieSpawns = true
                                             LinkNpcToQuestRequirement(nId, reqRecord)
                                             NS.activeQuestSpawns[nId] = {
                                                 kind     = kind,
@@ -738,6 +791,7 @@ function NS.UpdateQuestLogCache()
                                             }
                                         end
                                         if type(spawnData) == "table" and spawnData.Name and spawnData.Name ~= "" then
+                                            hasQuestieSpawns = true
                                             local sName = spawnData.Name
                                             LinkNameToQuestRequirement(sName, reqRecord)
                                             NS.activeQuestSpawnNames[string.lower(strtrim(sName))] = {
@@ -751,81 +805,92 @@ function NS.UpdateQuestLogCache()
                                     end
                                 end
 
-                                -- Check static QuestieDB for item sources if item drops
-                                if obj.Type == "item" and obj.Id and _G.QuestieLoader and _G.QuestieLoader.ImportModule then
-                                    local okDB, QDB = pcall(_G.QuestieLoader.ImportModule, _G.QuestieLoader, "QuestieDB")
-                                    if okDB and QDB and QDB.GetItem then
-                                        local itemData = QDB:GetItem(obj.Id)
-                                        if itemData and itemData.Sources then
-                                            for _, src in pairs(itemData.Sources) do
-                                                if src.Type == "monster" and src.Id then
-                                                    LinkNpcToQuestRequirement(src.Id, reqRecord)
+                                -- If Questie already provided verified spawns, DO NOT pollute them with static drop tables!
+                                if not hasQuestieSpawns then
+                                    local foundItemSources = false
+                                    if obj.Type == "item" and obj.Id and _G.QuestieLoader and _G.QuestieLoader.ImportModule then
+                                        local okDB, QDB = pcall(_G.QuestieLoader.ImportModule, _G.QuestieLoader, "QuestieDB")
+                                        if okDB and QDB and QDB.GetItem then
+                                            local itemData = QDB:GetItem(obj.Id)
+                                            if itemData and itemData.Sources then
+                                                for _, src in pairs(itemData.Sources) do
+                                                    if src.Type == "monster" and src.Id then
+                                                        foundItemSources = true
+                                                        LinkNpcToQuestRequirement(src.Id, reqRecord)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+
+                                    -- Check static kill tables only if monster objective without Questie spawns
+                                    if obj.Type == "monster" then
+                                        if NS.QuestKillNPCs and NS.QuestKillNPCs[qId] then
+                                            for npcKId in pairs(NS.QuestKillNPCs[qId]) do
+                                                LinkNpcToQuestRequirement(npcKId, reqRecord)
+                                            end
+                                        end
+                                        if NS.QuestKillMobs and NS.QuestKillMobs[qId] then
+                                            for mobKName in pairs(NS.QuestKillMobs[qId]) do
+                                                LinkNameToQuestRequirement(mobKName, reqRecord)
+                                            end
+                                        end
+                                    end
+
+                                    -- Check static item drops only if item objective without Questie spawns
+                                    if obj.Type == "item" and not foundItemSources then
+                                        local lowerT = string.lower(strtrim(target))
+                                        local tVars = GetNameVariants(lowerT)
+                                        if NS.QuestItemNPCs then
+                                            for tVar in pairs(tVars) do
+                                                local nTable = NS.QuestItemNPCs[tVar]
+                                                if nTable then
+                                                    for nDropId in pairs(nTable) do
+                                                        local lootReq = {
+                                                            questID      = qId,
+                                                            questTitle   = qTitle,
+                                                            objIndex     = objIdx,
+                                                            kind         = "loot",
+                                                            targetName   = target,
+                                                            description  = oText,
+                                                            numFulfilled = cur,
+                                                            numRequired  = needed,
+                                                            finished     = isDone,
+                                                        }
+                                                        LinkNpcToQuestRequirement(nDropId, lootReq)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                        if NS.QuestItemDrops then
+                                            for tVar in pairs(tVars) do
+                                                local dTable = NS.QuestItemDrops[tVar]
+                                                if dTable then
+                                                    for mDropName in pairs(dTable) do
+                                                        local lootReq = {
+                                                            questID      = qId,
+                                                            questTitle   = qTitle,
+                                                            objIndex     = objIdx,
+                                                            kind         = "loot",
+                                                            targetName   = target,
+                                                            description  = oText,
+                                                            numFulfilled = cur,
+                                                            numRequired  = needed,
+                                                            finished     = isDone,
+                                                        }
+                                                        LinkNameToQuestRequirement(mDropName, lootReq)
+                                                    end
                                                 end
                                             end
                                         end
                                     end
                                 end
 
-                                -- Map from QuestKillNPCs and QuestKillMobs
-                                if NS.QuestKillNPCs and NS.QuestKillNPCs[qId] then
-                                    for npcKId in pairs(NS.QuestKillNPCs[qId]) do
-                                        LinkNpcToQuestRequirement(npcKId, reqRecord)
-                                    end
+                                -- Only link monster target names directly (items are not creature names!)
+                                if obj.Type == "monster" or obj.Type == "talk" then
+                                    LinkNameToQuestRequirement(target, reqRecord)
+                                    LinkNameToQuestRequirement(CleanTargetName(target), reqRecord)
                                 end
-                                if NS.QuestKillMobs and NS.QuestKillMobs[qId] then
-                                    for mobKName in pairs(NS.QuestKillMobs[qId]) do
-                                        LinkNameToQuestRequirement(mobKName, reqRecord)
-                                    end
-                                end
-
-                                -- Map target name variants to QuestItemNPCs and QuestItemDrops
-                                local lowerT = string.lower(strtrim(target))
-                                local tVars = GetNameVariants(lowerT)
-                                if NS.QuestItemNPCs then
-                                    for tVar in pairs(tVars) do
-                                        local nTable = NS.QuestItemNPCs[tVar]
-                                        if nTable then
-                                            for nDropId in pairs(nTable) do
-                                                local lootReq = {
-                                                    questID      = qId,
-                                                    questTitle   = qTitle,
-                                                    objIndex     = objIdx,
-                                                    kind         = "loot",
-                                                    targetName   = target,
-                                                    description  = oText,
-                                                    numFulfilled = cur,
-                                                    numRequired  = needed,
-                                                    finished     = isDone,
-                                                }
-                                                LinkNpcToQuestRequirement(nDropId, lootReq)
-                                            end
-                                        end
-                                    end
-                                end
-                                if NS.QuestItemDrops then
-                                    for tVar in pairs(tVars) do
-                                        local dTable = NS.QuestItemDrops[tVar]
-                                        if dTable then
-                                            for mDropName in pairs(dTable) do
-                                                local lootReq = {
-                                                    questID      = qId,
-                                                    questTitle   = qTitle,
-                                                    objIndex     = objIdx,
-                                                    kind         = "loot",
-                                                    targetName   = target,
-                                                    description  = oText,
-                                                    numFulfilled = cur,
-                                                    numRequired  = needed,
-                                                    finished     = isDone,
-                                                }
-                                                LinkNameToQuestRequirement(mDropName, lootReq)
-                                            end
-                                        end
-                                    end
-                                end
-
-                                LinkNameToQuestRequirement(target, reqRecord)
-                                LinkNameToQuestRequirement(CleanTargetName(target), reqRecord)
                             end
                         end
                     end
