@@ -424,21 +424,15 @@ local function IsNameMatch(unitName, targetName, isItem)
     if not unitName or not targetName or IsSecretValue(unitName) or IsSecretValue(targetName) then return false end
     local u = string.lower(strtrim(unitName))
     local t = string.lower(strtrim(targetName))
-    if u == "" or t == "" then
-        return false
-    end
+    if u == "" or t == "" then return false end
 
-    -- 1. Exact match or simple plural match
-    if u == t or (u .. "s") == t or (t .. "s") == u then
-        return true
-    end
+    -- 1. Exact match
+    if u == t then return true end
 
-    -- 2. Whole phrase singular match
+    -- 2. Exact match with singular normalization
     local uSing = GetSingularWord(u)
     local tSing = GetSingularWord(t)
-    if uSing ~= "" and uSing == tSing then
-        return true
-    end
+    if uSing ~= "" and uSing == tSing then return true end
 
     -- 3. Extract core words excluding stop words and item drop nouns
     local uWords = {}
@@ -459,11 +453,7 @@ local function IsNameMatch(unitName, targetName, isItem)
 
     if #uWords == 0 or #tWords == 0 then return false end
 
-    local uClean = table.concat(uWords, " ")
-    local tClean = table.concat(tWords, " ")
-    if uClean == tClean then return true end
-
-    -- 4. Filter out creature age/size prefixes (young, starving, giant, etc.)
+    -- 4. Compare after stripping creature age/size prefixes (e.g. young, greater, starving, elder)
     local uCore = {}
     for _, w in ipairs(uWords) do
         if not CREATURE_PREFIXES[w] then
@@ -477,57 +467,23 @@ local function IsNameMatch(unitName, targetName, isItem)
         end
     end
 
-    if #uCore > 0 and #tCore > 0 then
-        if table.concat(uCore, " ") == table.concat(tCore, " ") then
-            return true
-        end
+    if #uCore == 0 or #tCore == 0 then return false end
+
+    -- Exact core match: "Young Goretusk" vs "Goretusk", "Starving Timber Wolf" vs "Timber Wolf"
+    if table.concat(uCore, " ") == table.concat(tCore, " ") then
+        return true
     end
 
-    -- 5. Disambiguate different ranks/roles within the same group (e.g. Defias Smuggler vs Defias Traitor)
-    local sharedWords = {}
-    local diffT = {}
-    local diffU = {}
-
-    local uCoreSet = {}
-    for _, w in ipairs(uCore) do uCoreSet[w] = true end
-    local tCoreSet = {}
-    for _, w in ipairs(tCore) do tCoreSet[w] = true end
-
-    for _, w in ipairs(tCore) do
-        if uCoreSet[w] then
-            table.insert(sharedWords, w)
-        else
-            table.insert(diffT, w)
-        end
-    end
-    for _, w in ipairs(uCore) do
-        if not tCoreSet[w] then
-            table.insert(diffU, w)
-        end
+    -- If target is a single generic word (e.g. target is "Wolf" or "Spider" or "Boar")
+    -- and that generic word is the base noun of the unit (the last word of uCore)
+    -- e.g. "Timber Wolf" ends with "wolf", "Forest Spider" ends with "spider"
+    if #tCore == 1 and uCore[#uCore] == tCore[1] then
+        return true
     end
 
-    -- If both have differing specific nouns (e.g. smuggler vs traitor, worker vs vermin)
-    if #diffT > 0 and #diffU > 0 then
-        local allSharedAreGroups = true
-        for _, sw in ipairs(sharedWords) do
-            if not GROUP_PREFIXES[sw] then
-                allSharedAreGroups = false
-                break
-            end
-        end
-        if allSharedAreGroups then
-            return false
-        end
-    end
-
-    if #sharedWords > 0 then
-        for _, sw in ipairs(sharedWords) do
-            if not GROUP_PREFIXES[sw] and string.len(sw) >= 4 then
-                return true
-            end
-        end
-    end
-
+    -- Otherwise, if both have differing specific qualifiers (e.g. "prairie" vs "timber",
+    -- "smuggler" vs "traitor", "worker" vs "vermin", "crag" vs "mountain",
+    -- "grizzled" vs "thistle", "mystic" vs "gnoll"): THEY DO NOT MATCH!
     return false
 end
 
@@ -779,28 +735,39 @@ function NS.UpdateQuestLogCache()
                                 if obj.spawnList and type(obj.spawnList) == "table" then
                                     for spawnId, spawnData in pairs(obj.spawnList) do
                                         local nId = tonumber(spawnId) or (type(spawnData) == "table" and tonumber(spawnData.Id))
-                                        if nId then
-                                            hasQuestieSpawns = true
-                                            LinkNpcToQuestRequirement(nId, reqRecord)
-                                            NS.activeQuestSpawns[nId] = {
-                                                kind     = kind,
-                                                progress = pStr,
-                                                finished = isDone,
-                                                title    = qTitle,
-                                                questID  = qId,
-                                            }
+                                        local sName = (type(spawnData) == "table" and spawnData.Name and spawnData.Name ~= "") and spawnData.Name or nil
+
+                                        -- Validate item drops against clean drop database (prevents Questie 0.0017% fluke drop leakage)
+                                        local allowSpawn = true
+                                        if kind == "loot" or obj.Type == "item" then
+                                            if not LookupQuestItemDrop(target, sName, nId) and not LookupQuestItemDrop(oText, sName, nId) then
+                                                allowSpawn = false
+                                            end
                                         end
-                                        if type(spawnData) == "table" and spawnData.Name and spawnData.Name ~= "" then
-                                            hasQuestieSpawns = true
-                                            local sName = spawnData.Name
-                                            LinkNameToQuestRequirement(sName, reqRecord)
-                                            NS.activeQuestSpawnNames[string.lower(strtrim(sName))] = {
-                                                kind     = kind,
-                                                progress = pStr,
-                                                finished = isDone,
-                                                title    = qTitle,
-                                                questID  = qId,
-                                            }
+
+                                        if allowSpawn then
+                                            if nId then
+                                                hasQuestieSpawns = true
+                                                LinkNpcToQuestRequirement(nId, reqRecord)
+                                                NS.activeQuestSpawns[nId] = {
+                                                    kind     = kind,
+                                                    progress = pStr,
+                                                    finished = isDone,
+                                                    title    = qTitle,
+                                                    questID  = qId,
+                                                }
+                                            end
+                                            if sName then
+                                                hasQuestieSpawns = true
+                                                LinkNameToQuestRequirement(sName, reqRecord)
+                                                NS.activeQuestSpawnNames[string.lower(strtrim(sName))] = {
+                                                    kind     = kind,
+                                                    progress = pStr,
+                                                    finished = isDone,
+                                                    title    = qTitle,
+                                                    questID  = qId,
+                                                }
+                                            end
                                         end
                                     end
                                 end
@@ -815,8 +782,10 @@ function NS.UpdateQuestLogCache()
                                             if itemData and itemData.Sources then
                                                 for _, src in pairs(itemData.Sources) do
                                                     if src.Type == "monster" and src.Id then
-                                                        foundItemSources = true
-                                                        LinkNpcToQuestRequirement(src.Id, reqRecord)
+                                                        if LookupQuestItemDrop(target, nil, src.Id) or LookupQuestItemDrop(oText, nil, src.Id) then
+                                                            foundItemSources = true
+                                                            LinkNpcToQuestRequirement(src.Id, reqRecord)
+                                                        end
                                                     end
                                                 end
                                             end
@@ -1041,8 +1010,10 @@ function NS.UpdateQuestLogCache()
                                 end
                             end
 
-                            LinkNameToQuestRequirement(targetName, reqRecord)
-                            LinkNameToQuestRequirement(CleanTargetName(targetName), reqRecord)
+                            if oKind ~= "loot" then
+                                LinkNameToQuestRequirement(targetName, reqRecord)
+                                LinkNameToQuestRequirement(CleanTargetName(targetName), reqRecord)
+                            end
                         end
 
                         -- If quest has no objectives listed in log (delivery / report-to / finisher quests)
@@ -1198,21 +1169,7 @@ function NS.ResolveQuestForUnit(unit)
     -- -----------------------------------------------------------------------
     local rawCandidates = {}
 
-    -- A. Check NpcToQuests
-    if numNpcId and NS.NpcToQuests and NS.NpcToQuests[numNpcId] then
-        for _, rec in ipairs(NS.NpcToQuests[numNpcId]) do
-            table.insert(rawCandidates, rec)
-        end
-    end
-
-    -- B. Check NameToQuests
-    if lowerUnit and NS.NameToQuests and NS.NameToQuests[lowerUnit] then
-        for _, rec in ipairs(NS.NameToQuests[lowerUnit]) do
-            table.insert(rawCandidates, rec)
-        end
-    end
-
-    -- C. Check Questie Tooltips if preferQuestie and module available
+    -- A. Check Questie Tooltips FIRST if preferQuestie and module available
     local QuestieTooltips = (NS.db and NS.db.preferQuestie) and GetQuestieModule("QuestieTooltips")
     local hasQuestie = (QuestieTooltips and QuestieTooltips.lookupByKey ~= nil)
     if hasQuestie and numNpcId then
@@ -1278,8 +1235,22 @@ function NS.ResolveQuestForUnit(unit)
         end
     end
 
+    -- B. Check NpcToQuests
+    if numNpcId and NS.NpcToQuests and NS.NpcToQuests[numNpcId] then
+        for _, rec in ipairs(NS.NpcToQuests[numNpcId]) do
+            table.insert(rawCandidates, rec)
+        end
+    end
+
+    -- C. Check NameToQuests
+    if lowerUnit and NS.NameToQuests and NS.NameToQuests[lowerUnit] then
+        for _, rec in ipairs(NS.NameToQuests[lowerUnit]) do
+            table.insert(rawCandidates, rec)
+        end
+    end
+
     -- -----------------------------------------------------------------------
-    -- LIVE REQUIREMENT EVALUATION & DEDUPLICATION
+    -- LIVE REQUIREMENT EVALUATION, VALIDATION & DEDUPLICATION
     -- -----------------------------------------------------------------------
     local evaluated = {}
     local seenKey = {}
@@ -1287,16 +1258,65 @@ function NS.ResolveQuestForUnit(unit)
     local completeList = {}
 
     for _, cand in ipairs(rawCandidates) do
-        local live = NS.GetLiveRequirement(cand)
-        if live then
-            local key = tostring(live.questID) .. ":" .. tostring(live.objIndex) .. ":" .. tostring(live.kind)
-            if not seenKey[key] then
-                seenKey[key] = true
-                table.insert(evaluated, live)
-                if live.finished then
-                    table.insert(completeList, live)
-                else
-                    table.insert(incompleteList, live)
+        local keep = true
+
+        -- 1. STRICT LOOT VALIDATION:
+        -- Verify with our clean >= 5.0% Wowhead Forever drop database.
+        -- Completely blocks 0.0017% fluke drops (e.g. Goretusk Liver on Defias Smugglers).
+        if cand.kind == "loot" then
+            local itemName = cand.targetName or cand.description
+            if itemName and itemName ~= "" then
+                local cleanItem = ExtractTargetName(itemName)
+                if not LookupQuestItemDrop(itemName, unitName, numNpcId) and
+                   not LookupQuestItemDrop(cleanItem, unitName, numNpcId) then
+                    keep = false
+                end
+            end
+        elseif cand.kind == "slay" then
+            -- 2. STRICT SLAY VALIDATION:
+            -- Verify with QuestKillNPCs and QuestKillMobs.
+            local isKillValid = false
+            if cand.questID and cand.questID > 0 then
+                if numNpcId and NS.QuestKillNPCs and NS.QuestKillNPCs[cand.questID] and NS.QuestKillNPCs[cand.questID][numNpcId] then
+                    isKillValid = true
+                elseif lowerUnit and NS.QuestKillMobs and NS.QuestKillMobs[cand.questID] and NS.QuestKillMobs[cand.questID][lowerUnit] then
+                    isKillValid = true
+                end
+            end
+            if not isKillValid and unitName and cand.targetName and cand.targetName ~= "" then
+                if IsNameMatch(unitName, cand.targetName, false) then
+                    isKillValid = true
+                end
+            end
+
+            -- Disqualify if candidate objective targets a different specific creature
+            -- E.g. in multi-target quests like Quest 12 (Trapper vs Smuggler), Smuggler must NOT match Trapper!
+            if isKillValid and unitName and cand.targetName and cand.targetName ~= "" then
+                local objTgt = ExtractTargetName(cand.targetName)
+                if objTgt ~= "" and string.len(objTgt) >= 3 then
+                    if not IsNameMatch(unitName, cand.targetName, false) and not IsNameMatch(unitName, objTgt, false) then
+                        isKillValid = false
+                    end
+                end
+            end
+
+            if not isKillValid then
+                keep = false
+            end
+        end
+
+        if keep then
+            local live = NS.GetLiveRequirement(cand)
+            if live then
+                local key = tostring(live.questID) .. ":" .. tostring(live.objIndex) .. ":" .. tostring(live.kind)
+                if not seenKey[key] then
+                    seenKey[key] = true
+                    table.insert(evaluated, live)
+                    if live.finished then
+                        table.insert(completeList, live)
+                    else
+                        table.insert(incompleteList, live)
+                    end
                 end
             end
         end
@@ -1315,7 +1335,8 @@ function NS.ResolveQuestForUnit(unit)
                 end
 
                 local cur, req = string.match(lineText, "(%d+)%s*/%s*(%d+)")
-                if cur and req then
+                -- Only treat as a quest objective if an active quest title was detected in the tooltip
+                if currentQuestMatch and cur and req then
                     local curNum = tonumber(cur) or 0
                     local reqNum = tonumber(req) or 1
                     local isFin = (curNum >= reqNum)

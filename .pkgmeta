@@ -1,0 +1,7 @@
+package-as: MyQuestPlates
+
+ignore:
+  - .github
+  - .gitignore
+  - README.md
+  - "*.zip"
